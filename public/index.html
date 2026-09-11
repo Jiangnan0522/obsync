@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>obsync</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fbfbfc; --panel2:#eef0f3; --line:#dcdfe4;
+    --text:#1c1f24; --dim:#565e6b; --accent:#2563c9; --accent-soft:#2563c916;
+    --ok:#0f7a4a; --warn:#9c6400; --bad:#c8303a; --idle:#98a0ab;
+    --radius:8px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;
+    overflow:hidden;
+  }
+  button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+  code{font-family:"SF Mono",ui-monospace,monospace}
+
+  #app{display:grid;grid-template-columns:200px 1fr 1fr 1fr;height:100vh}
+
+  /* ---------- sidebar ---------- */
+  #sidebar{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column}
+  .brand{padding:16px 16px 12px;font-weight:600;font-size:15px;letter-spacing:.3px}
+  .brand small{display:block;font-weight:400;color:var(--dim);font-size:11px;letter-spacing:0}
+  .side-label{padding:14px 16px 6px;font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim)}
+  .host{display:flex;align-items:center;gap:8px;padding:8px 16px;cursor:pointer;border-left:2px solid transparent}
+  .host:hover{background:var(--panel2)}
+  .host.active{background:var(--accent-soft);border-left-color:var(--accent)}
+  .host .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .host .ct{font-size:11px;color:var(--dim)}
+  .host .host-x{flex:none;font-size:11px;color:var(--dim);padding:0 4px;border-radius:4px;opacity:0}
+  .host:hover .host-x{opacity:1}
+  .host .host-x:hover{background:var(--bad);color:#fff}
+  .host-add{display:block;width:calc(100% - 20px);margin:8px 10px 0;padding:6px;border-radius:6px;
+    border:1px dashed var(--line);color:var(--dim);font-size:12px;text-align:center}
+  .host-add:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+  .modal-note{margin-top:12px;font-size:12px;color:var(--dim);line-height:1.5;word-break:break-all}
+  .modal-note.bad{color:var(--bad)}
+  select.modal-input{cursor:pointer}
+  .modal-input+.modal-input{margin-top:8px}
+  .side-foot{margin-top:auto;padding:12px 16px;font-size:11px;color:var(--dim);border-top:1px solid var(--line)}
+
+  /* ---------- panes ---------- */
+  .pane{display:flex;flex-direction:column;min-width:0;border-right:1px solid var(--line)}
+  .pane:last-child{border-right:none}
+  .pane-head{padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .pane-top{display:flex;align-items:center;gap:8px;margin-bottom:6px;min-height:22px}
+  .pane-title{flex:1;min-width:0;font-size:10.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .root-picker{display:flex;align-items:center;gap:4px;flex:none}
+  .root-sel{background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:5px;
+    font:inherit;font-size:11px;padding:2px 4px;max-width:120px}
+  .open-btn{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:5px;padding:2px 8px}
+  .open-btn:hover{background:var(--panel2);color:var(--text);border-color:var(--accent)}
+  .crumbs{display:flex;flex-wrap:wrap;gap:2px;align-items:center;font-size:12px;min-height:20px}
+  .crumbs button{padding:2px 5px;border-radius:4px;color:var(--dim);max-width:150px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .crumbs button:hover{background:var(--panel2);color:var(--text)}
+  .crumbs button.last{color:var(--text);font-weight:500}
+  .crumbs .sep{color:var(--dim);opacity:.45}
+  .pane-body{flex:1;overflow-y:auto;padding:6px}
+
+  .row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;user-select:none}
+  /* Folders get a small chevron; files get no icon at all. The chevron box is a
+     fixed 12px and the row gap is 8px, so file rows re-create that 20px of
+     leading space with padding and both name columns stay flush. */
+  .row .ico{width:12px;text-align:center;flex:none;color:var(--dim);opacity:.7;
+    font-size:15px;line-height:1;font-weight:600}
+  .row .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row.folder{cursor:pointer}
+  .row.folder:hover{background:var(--panel2)}
+  .row.folder:hover .ico{opacity:1;color:var(--accent)}
+  .row.file{color:var(--dim);padding-left:28px}
+  .row.draggable{cursor:grab}
+  .row.dragging{opacity:.4}
+  .row .tag{font-size:10px;color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:0 4px;flex:none}
+  .row .tag.sub{color:var(--dim);border-color:var(--line);border-style:dashed;cursor:help}
+  .empty{padding:24px 12px;text-align:center;color:var(--dim);font-size:12px}
+
+  /* ---------- links pane ---------- */
+  #linkHint{color:var(--dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+  #linkHint.active{color:var(--accent);font-weight:500}
+  #linksBody.drop-ok{background:var(--accent-soft);outline:2px dashed var(--accent);outline-offset:-6px}
+  .link{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:10px 12px;margin-bottom:8px;cursor:grab}
+  .link.dragging{opacity:.4}
+  .link-top{display:flex;align-items:center;gap:8px}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--idle)}
+  .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)}
+  .dot.bad{background:var(--bad)} .dot.idle{background:var(--idle)}
+  .dot.ok.live{animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+  .link-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+  .origin{font-size:10px;border-radius:4px;padding:1px 6px;flex:none;white-space:nowrap;
+    border:1px solid currentColor;opacity:.9}
+  .origin.up{color:var(--accent)} .origin.down{color:var(--ok)} .origin.merge{color:var(--warn)}
+  .link-acts{display:flex;gap:2px;opacity:0;transition:opacity .12s}
+  .link:hover .link-acts{opacity:1}
+  .link-acts button{padding:2px 6px;border-radius:4px;color:var(--dim);font-size:12px}
+  .link-acts button:hover{background:var(--line);color:var(--text)}
+  .link-meta{margin-top:6px;font-size:11px;color:var(--dim);display:flex;flex-direction:column;gap:2px}
+  .link-meta .side{display:flex;gap:6px;min-width:0}
+  .link-meta b{font-weight:500;color:var(--dim);opacity:.7;flex:none}
+  .link-meta code{font-size:10.5px;word-break:break-all;min-width:0}
+  .link-status{margin-top:6px;font-size:11px}
+  .link-status.bad{color:var(--bad)} .link-status.warn{color:var(--warn)} .link-status.ok{color:var(--ok)}
+
+  #trash{margin:6px;padding:14px;border:1px dashed var(--line);border-radius:var(--radius);
+    text-align:center;color:var(--dim);font-size:11.5px;transition:all .12s}
+  #trash.drop-ok{border-color:var(--bad);color:var(--bad);background:#c8303a12}
+
+  /* ---------- modal ---------- */
+  .modal-back{position:fixed;inset:0;background:#1c1f2440;display:flex;align-items:center;justify-content:center;z-index:60}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:20px;width:420px;max-width:88vw;box-shadow:0 16px 48px #1c1f2426}
+  .modal-title{font-size:14px;font-weight:600;margin-bottom:8px}
+  .modal-detail{font-size:12.5px;color:var(--dim);line-height:1.6;white-space:pre-line;word-break:break-all}
+  .modal-input{width:100%;margin-top:14px;padding:8px 10px;border-radius:6px;
+    background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    font-family:"SF Mono",ui-monospace,monospace;font-size:12px}
+  .modal-input:focus{outline:none;border-color:var(--accent)}
+  .paths{margin-top:14px;display:flex;flex-direction:column;gap:6px}
+  .path-row{display:flex;align-items:baseline;gap:8px;font-size:11px;padding:7px 9px;border-radius:6px;
+    background:var(--panel2);border:1px solid var(--line)}
+  .path-row code{word-break:break-all;color:var(--dim);min-width:0}
+  .path-row .pr-tag{flex:none;font-size:10px;padding:1px 6px;border-radius:4px;border:1px solid currentColor}
+  .path-row .pr-side{flex:none;color:var(--dim);opacity:.8}
+  .path-row.safe{border-color:#0f7a4a66;background:#0f7a4a0d} .path-row.safe .pr-tag{color:var(--ok)}
+  .path-row.dest{border-color:#9c640066;background:#9c64000d} .path-row.dest .pr-tag{color:var(--warn)}
+  .danger-opt{display:flex;align-items:flex-start;gap:8px;margin-top:14px;padding:9px 10px;
+    border:1px solid var(--line);border-radius:6px;font-size:12px;color:var(--dim);cursor:pointer}
+  .danger-opt:hover{border-color:var(--bad)}
+  .danger-opt.armed{border-color:var(--bad);background:#c8303a0f;color:var(--bad)}
+  .danger-opt input{margin-top:2px;flex:none;accent-color:var(--bad)}
+  .modal-acts{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+  .btn{padding:6px 14px;border-radius:6px;border:1px solid var(--line);color:var(--dim)}
+  .btn:hover{background:var(--line);color:var(--text)}
+  .btn.primary{border-color:var(--bad);color:var(--bad)}
+  .btn.primary:hover{background:var(--bad);color:#fff;border-color:var(--bad)}
+  .btn.ok{border-color:var(--accent);color:var(--accent)}
+  .btn.ok:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+  /* ---------- toast ---------- */
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:10px 16px;max-width:70vw;box-shadow:0 8px 24px #1c1f2422;display:none;z-index:50}
+  #toast.show{display:block}
+  #toast.err{border-color:var(--bad);color:var(--bad)}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <div class="brand">obsync<small>Obsidian ⇄ HPC</small></div>
+    <div class="side-label">主机</div>
+    <div id="hosts"></div>
+    <div class="side-foot" id="foot">—</div>
+  </div>
+
+  <!-- LEFT: remote working dir -->
+  <div class="pane">
+    <div class="pane-head">
+      <div class="pane-top">
+        <div class="pane-title">远程 · <span id="remoteHost">—</span></div>
+        <div class="root-picker" id="remoteRoot"></div>
+      </div>
+      <div class="crumbs" id="remoteCrumbs"></div>
+    </div>
+    <div class="pane-body" id="remoteBody"></div>
+  </div>
+
+  <!-- MIDDLE: links -->
+  <div class="pane">
+    <div class="pane-head">
+      <div class="pane-top"><div class="pane-title">同步链接</div></div>
+      <div class="crumbs"><span id="linkHint"></span></div>
+    </div>
+    <div class="pane-body" id="linksBody"></div>
+    <div id="trash">拖到这里断开同步</div>
+  </div>
+
+  <!-- RIGHT: local working dir -->
+  <div class="pane">
+    <div class="pane-head">
+      <div class="pane-top">
+        <div class="pane-title">本地</div>
+        <div class="root-picker" id="localRoot"></div>
+      </div>
+      <div class="crumbs" id="localCrumbs"></div>
+    </div>
+    <div class="pane-body" id="localBody"></div>
+  </div>
+</div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
