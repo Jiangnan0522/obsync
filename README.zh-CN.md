@@ -161,6 +161,7 @@ mutagen 的连接则保持直连。
 | 一直卡在 "scanning" | 文件夹太大了。新建链接时会就此警告，已有的链接不会再复查 |
 | 文件数对不上 | 先看差异是不是落在 `ignore` 里（`.obsidian/`、`.git/`、…）。用 `find . -type f` 比对文件名，别比数字 |
 | 链接不见了 | 数据没丢；两侧的文件都还在。拖回去就行——会出现合并提示 |
+| 链接卡在 "connecting"，但 `ssh <主机>` 却正常 | ssh ControlMaster 的通道用尽了。把该主机 `~/.ssh/config` 块里的 `ControlMaster` 去掉并删除它的 socket；obsync 自己会做复用 |
 | UI 打不开 | `obsync log` |
 
 ## 许可证
