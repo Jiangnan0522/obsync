@@ -126,6 +126,17 @@ starting point, returning nothing. `-H` dereferences the start only. Remote
 commands also `test -d` first and emit a sentinel on failure — otherwise every
 error renders as "empty directory".
 
+**Never share an ssh ControlMaster with mutagen.** Multiplexing makes obsync's
+own directory listings ~100x faster, so it is tempting to turn it on in
+`~/.ssh/config` for your sync hosts. Don't: mutagen holds one ssh channel per
+sync session *forever*, so the master never goes idle and `ControlPersist`
+never recycles it, while channels leaked by unclean disconnects accumulate
+until the server hits `MaxSessions` and refuses every new one. The only visible
+symptom is sessions stuck in "connecting" — and a manual `ssh` to the same host
+still succeeds, because it rides an already-open channel. obsync multiplexes
+its own calls on a private socket under `~/.obsync/` and leaves mutagen's
+connections direct.
+
 **Size probes exit early.** Before creating a link, the source is measured and
 anything over the threshold (5 MB / 2000 files by default) prompts. The probe
 stops the instant it crosses the limit — `awk` exits, `find` takes SIGPIPE — so
@@ -160,6 +171,7 @@ folder that nests with an existing link warns you.
 | Stuck "scanning" | The folder is too large. New links warn about this; existing ones don't get re-checked |
 | File counts differ | Check whether the difference is in `ignore` (`.obsidian/`, `.git/`, …). Compare names with `find . -type f`, not counts |
 | A link vanished | No data is lost; both sides keep their files. Drag it back — you'll get the merge prompt |
+| Links stuck "connecting", but `ssh <host>` works fine | An ssh ControlMaster is out of channels. Remove `ControlMaster` from that host's `~/.ssh/config` block and delete its socket; obsync does its own multiplexing |
 | UI won't open | `obsync log` |
 
 ## License

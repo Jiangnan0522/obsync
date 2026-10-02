@@ -118,6 +118,26 @@ function shq(s) {
   return "'" + String(s).replace(/'/g, `'\\''`) + "'";
 }
 
+
+// obsync's own ssh calls are short-lived directory listings, so multiplexing is
+// a large win (~2.3s -> 0.02s per call). They get their OWN control socket,
+// deliberately not shared with mutagen: mutagen holds one ssh channel per sync
+// session forever, so its master never idles out, and channels leaked by
+// unclean disconnects pile up until the server hits MaxSessions and refuses
+// every new one ("Session open refused by peer") -- which surfaces only as
+// sessions stuck connecting. Keeping the two apart makes that impossible.
+const SSH_MUX = [
+  '-o', 'BatchMode=yes',
+  '-o', 'ControlMaster=auto',
+  '-o', `ControlPath=${path.join(os.homedir(), '.obsync', 'mux-%r@%h:%p')}`,
+  '-o', 'ControlPersist=60',
+  '-o', 'ConnectTimeout=20',
+];
+
+function ssh(alias, command, opts = {}) {
+  return run('ssh', [...SSH_MUX, alias, command], opts);
+}
+
 // ---------------------------------------------------------------------------
 // path containment — a path must sit inside one of the user's roots
 // ---------------------------------------------------------------------------
@@ -205,8 +225,7 @@ function sessionName(host, localPath, remotePath) {
 }
 
 async function remoteIsDir(alias, p) {
-  const { stdout } = await run('ssh', ['-o', 'BatchMode=yes', alias,
-    `test -d ${shq(p)} && echo yes || echo no`]);
+  const { stdout } = await ssh(alias, `test -d ${shq(p)} && echo yes || echo no`);
   return stdout.trim().endsWith('yes');
 }
 
@@ -283,7 +302,7 @@ async function createLink(cfg, { hostAlias, source, sourcePath, destDir, confirm
   // as a clean message instead of a broken session.
   const createdRemote = !remoteExists;
   const createdLocal = !localExists;
-  if (createdRemote) await run('ssh', ['-o', 'BatchMode=yes', hostAlias, `mkdir -p -- ${shq(remote)}`]);
+  if (createdRemote) await ssh(hostAlias, `mkdir -p -- ${shq(remote)}`);
   if (createdLocal) await fsp.mkdir(local, { recursive: true });
 
   // Both sides already had content, so neither direction is the truth.
@@ -307,7 +326,7 @@ async function createLink(cfg, { hostAlias, source, sourcePath, destDir, confirm
   } catch (err) {
     // Roll back the empty directory we just made, so a failed drop leaves no trace.
     if (createdLocal) await fsp.rmdir(local).catch(() => {});
-    if (createdRemote) await run('ssh', ['-o','BatchMode=yes', hostAlias, `rmdir -- ${shq(remote)}`]).catch(() => {});
+    if (createdRemote) await ssh(hostAlias, `rmdir -- ${shq(remote)}`).catch(() => {});
     throw err;
   }
   return { name, localPath: local, remotePath: remote };
@@ -411,7 +430,7 @@ async function terminateLink(cfg, name, deleteDest) {
     const moved = await trashLocal(targetPath);
     return { deleted: { side: 'local', path: targetPath, trashed: moved } };
   }
-  await run('ssh', ['-o', 'BatchMode=yes', dest.host, `rm -rf -- ${shq(targetPath)}`]);
+  await ssh(dest.host, `rm -rf -- ${shq(targetPath)}`);
   return { deleted: { side: 'remote', path: targetPath, trashed: null } };
 }
 
@@ -460,9 +479,7 @@ async function sshConfigAliases() {
 // One round trip proves reachability, proves key auth works without a prompt,
 // and yields the default root — so the user never has to type an absolute path.
 async function probeHost(alias) {
-  const { stdout } = await run('ssh',
-    ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', alias, 'echo "__H:$HOME"'],
-    { timeout: 40000 });
+  const { stdout } = await ssh(alias, 'echo "__H:$HOME"', { timeout: 40000 });
   const line = stdout.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('__H:')).pop();
   const home = line && line.slice(4);
   if (!home || !home.startsWith('/')) throw new HttpError(502, '连上了，但没能读到远端 HOME 目录');
@@ -550,7 +567,7 @@ async function probeRemoteSize(cfg, alias, p, limit, maxFiles) {
   const cmd = `find -H ${shq(p)} ${pruneExpr}-type f -printf '%s\\n' 2>/dev/null `
     + `| awk -v lim=${limit} -v maxn=${maxFiles} `
     + `'{s+=$1;n++; if(s>lim||n>maxn){printf "OVER %d %d\\n",s,n; exit}} END{printf "DONE %d %d\\n",s+0,n+0}'`;
-  const { stdout } = await run('ssh', ['-o', 'BatchMode=yes', alias, cmd]);
+  const { stdout } = await ssh(alias, cmd);
   const [tag, bytes, files] = stdout.trim().split(/\s+/);
   return { over: tag === 'OVER', bytes: Number(bytes) || 0, files: Number(files) || 0 };
 }
@@ -639,7 +656,7 @@ async function listRemote(cfg, alias, dir) {
   // NUL-delimited so names containing newlines cannot corrupt the listing.
   const cmd = `test -d ${shq(target)} || { printf '${MISSING}'; exit 0; }; `
     + `find -H ${shq(target)} -maxdepth 1 -mindepth 1 -printf '%y\\t%f\\0' 2>/dev/null || true`;
-  const { stdout } = await run('ssh', ['-o', 'BatchMode=yes', alias, cmd]);
+  const { stdout } = await ssh(alias, cmd);
   // Without this an unreadable or vanished directory would render as "empty".
   if (stdout.startsWith(MISSING)) throw new HttpError(404, `远端目录不存在或不可读：${target}`);
 
