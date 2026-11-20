@@ -16,6 +16,7 @@ const posix = path.posix;
 const os = require('os');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
+const { Breaker, SSH_BIN_DIR } = require('./breaker');
 
 const CONFIG_PATH = path.join(os.homedir(), '.obsync', 'config.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -84,11 +85,13 @@ function saveConfig(cfg) {
     warnSizeMB: cfg.warnSizeMB,
     warnFileCount: cfg.warnFileCount,
     ignore: cfg.ignore,
+    breaker: cfg.breaker,
     hosts: cfg.hosts.map((h) => ({
       alias: h.alias,
       label: h.label,
       remoteRoots: h.remoteRoots,
       lastRemoteDir: h.lastRemoteDir,
+      failover: h.failover,
     })),
   };
   const tmp = CONFIG_PATH + '.tmp';
@@ -134,8 +137,17 @@ const SSH_MUX = [
   '-o', 'ConnectTimeout=20',
 ];
 
-function ssh(alias, command, opts = {}) {
-  return run('ssh', [...SSH_MUX, alias, command], opts);
+// Refused outright while the alias's server is tripped (another failed login
+// is another penalty), and failures are reported to the breaker so obsync's
+// own listings can trip it too.
+async function ssh(alias, command, opts = {}) {
+  breaker.assertSshAllowed(alias);
+  try {
+    return await run('ssh', [...SSH_MUX, alias, command], opts);
+  } catch (err) {
+    breaker.observe(alias, err.stderr);
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +222,7 @@ function normaliseSession(s) {
       (s.alphaGlobalProblems || []).length +
       (s.betaGlobalProblems || []).length,
     successfulCycles: s.successfulCycles || 0,
+    lastError: s.lastError || '',
     creationTime: s.creationTime,
   };
 }
@@ -334,12 +347,11 @@ async function createLink(cfg, { hostAlias, source, sourcePath, destDir, confirm
 
 async function sessionAction(name, action) {
   const sessions = await listSessions();
-  if (!sessions.some((x) => x.name === name)) throw new HttpError(404, '没有这条 obsync 链接');
+  const s = sessions.find((x) => x.name === name);
+  if (!s) throw new HttpError(404, '没有这条 obsync 链接');
+  if (action === 'resume') breaker.assertResumeAllowed(s);
   await run('mutagen', ['sync', action, name]);
 }
-
-
-
 
 
 // Two sessions whose roots nest inside one another both manage the same files,
@@ -814,6 +826,26 @@ async function handle(req, res) {
     return json(res, 201, { ...made, sessions: await listSessions() });
   }
 
+  if (req.method === 'GET' && p === '/api/breaker') return json(res, 200, breaker.snapshot());
+
+  if (req.method === 'GET' && p === '/api/breaker/log') {
+    return json(res, 200, { lines: await breaker.readLog(300) });
+  }
+
+  if (req.method === 'POST' && p === '/api/breaker/probe') {
+    const { alias } = await readBody(req);
+    hostOf(cfg, alias);
+    const r = await breaker.manualProbe(alias);
+    return json(res, 200, { ...r, breaker: breaker.snapshot() });
+  }
+
+  if (req.method === 'POST' && p === '/api/breaker/switch') {
+    const { alias, hostName, force } = await readBody(req);
+    hostOf(cfg, alias);
+    const r = await breaker.switchNode(alias, hostName, { force: !!force });
+    return json(res, 200, { ...r, breaker: breaker.snapshot() });
+  }
+
   const m = p.match(/^\/api\/links\/([A-Za-z0-9][-A-Za-z0-9_.]*)\/(terminate|pause|resume|flush)$/);
   if (req.method === 'POST' && m) {
     if (m[2] === 'terminate') {
@@ -838,7 +870,14 @@ const server = http.createServer((req, res) => {
   });
 });
 
+const breaker = new Breaker({ run, listSessions, loadConfig });
+
 const boot = loadConfig();
+breaker.start();
+// A mutagen daemon that obsync itself autostarts (no LaunchAgent) inherits this
+// and so also goes through the wrapper. Only set once the wrapper is in place:
+// a MUTAGEN_SSH_PATH without an ssh in it breaks every session.
+if (breaker.wrapperInstalled) process.env.MUTAGEN_SSH_PATH = SSH_BIN_DIR;
 // Loopback only: this server can start sync sessions, it must never be
 // reachable from the network.
 server.listen(boot.port, '127.0.0.1', () => {

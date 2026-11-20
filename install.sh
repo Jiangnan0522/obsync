@@ -97,6 +97,8 @@ case "\${1:-}" in
     else pkill -f "\$OBSYNC_DIR/server.js" 2>/dev/null; start && echo restarted || echo "failed — see: obsync log"; fi
     ;;
   log)    tail -f "\$HOME/.obsync/server.log" ;;
+  events) tail -n "\${2:-50}" -f "\$HOME/.obsync/breaker.log" ;;
+  ssh-wrapper) "\$OBSYNC_DIR/libexec/mutagen-ssh-wrapper.sh" "\${2:-status}" ;;
   status)
     up && echo "running on http://127.0.0.1:\$PORT" || echo "not running"
     managed && echo "launchd: managed" || echo "launchd: not managed"
@@ -160,6 +162,19 @@ PLISTEOF
     say "· skipped the LaunchAgent; \`obsync\` starts the server on demand"
     ;;
 esac
+
+# ---------------------------------------------------------------- ssh wrapper
+# mutagen hard-codes -oConnectTimeout=5 -oServerAliveCountMax=1. Against a slow
+# sshd with PerSourcePenalties (OpenSSH >= 9.8) every reconnect then gives up
+# before authenticating, and the server bans this machine's IP.
+if [ -t 0 ] && [ -f "$HOME/Library/LaunchAgents/io.mutagen.mutagen.plist" ]; then
+  printf 'Route mutagen'"'"'s ssh through obsync'"'"'s wrapper (longer timeouts, visible reconnect errors)? [Y/n] '
+  read -r reply || reply=y
+  case "$reply" in
+    [nN]*) say "· skipped; enable later with: obsync ssh-wrapper on" ;;
+    *) "$DIR/libexec/mutagen-ssh-wrapper.sh" on ;;
+  esac
+fi
 
 say ""
 say "Done. Run:  obsync"

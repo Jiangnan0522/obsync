@@ -16,7 +16,7 @@ side's **working directory**. Drag a folder out of either pane and its
 counterpart is created under the *other* pane's working directory, then the two
 stay in sync — bidirectionally, continuously, with conflict detection.
 
-No Electron, no build step, no npm dependencies. A ~900-line Node server using
+No Electron, no build step, no npm dependencies. A small Node server using
 only the standard library, plus a single-page frontend.
 
 ## Why not just rsync / scp / a git repo
@@ -146,6 +146,56 @@ it costs the same on a 5 MB folder as on a 188 GB one. Measured: 0.12s.
 two sessions manage the same files and echo each other's writes. Dragging a
 folder that nests with an existing link warns you.
 
+## Circuit breaker — don't get your IP banned
+
+OpenSSH ≥ 9.8 sshd has `PerSourcePenalties`: every connection that ends
+*before authenticating* — the client timed out, gave up, failed auth — adds
+penalty time to your IP, and once it accrues **every** new connection from that
+IP is refused ("Not allowed at this time"), your terminal and VS Code included,
+for up to 10 minutes. mutagen is an ideal penalty generator: it hard-codes
+`-oConnectTimeout=5 -oServerAliveCountMax=1` and retries every 15 s per session,
+forever. One slow login node and six sessions get you banned within minutes.
+
+obsync runs a breaker per **server** (aliases resolved with `ssh -G`; two
+aliases with the same HostName are one sshd and one penalty account):
+
+- **Trip** when a session has been unable to reach its remote for 35 s (≈ two
+  failed reconnects), or as soon as any ssh output says `Not allowed at this
+  time`, `banner exchange` or `kex_exchange_identification`. Every obsync
+  session on that server is paused (`mutagen sync pause`); obsync's own
+  directory listings to it are refused too.
+- **Wait** 2 → 5 → 10 → 20 min (then 20 again); at least 10 min after a ban.
+  DNS/"network unreachable" failures never reach the server, so they retry
+  every minute without escalating.
+- **Probe** with one real login: `ssh -o BatchMode=yes -o ConnectTimeout=30
+  <alias> true`. Never a TCP/banner check (`nc`, a socket that reads the banner
+  and closes) — to sshd that *is* a pre-auth disconnect, i.e. more penalty.
+  Never two probes at once.
+- **Resume** the sessions it paused, one every 8 s. A failure mid-way trips again.
+- **Switch node** (optional): give a host `"failover": ["login1…", "login2…"]`
+  and the middle pane offers *切换节点*: pause → rewrite `HostName` in that
+  alias's `~/.ssh/config` block (backed up to `~/.obsync/ssh-config-backups/`)
+  → probe → resume. A node that banned you in the last 10 min is refused.
+  `"breaker": {"autoFailover": true}` does this automatically on a ban.
+
+Every pause / probe / resume / switch is logged with the triggering error
+verbatim to `~/.obsync/breaker.log` (`obsync events`). The mutagen daemon keeps
+no log of its own. Knobs live under `"breaker"` in the config (`tripAfterSeconds`,
+`backoffMinutes`, `bannedMinutes`, `staggerSeconds`, `enabled`, …).
+
+**The ssh wrapper.** Command-line `-o` beats `~/.ssh/config`, so mutagen's
+timeouts cannot be fixed in the config. mutagen 0.18 looks up `ssh` and `scp`
+in `$MUTAGEN_SSH_PATH` (a directory) when that is set in the *daemon's*
+environment. `obsync ssh-wrapper on` puts `libexec/ssh-wrapper.sh` there
+(`~/.obsync/ssh-bin/`) and adds the variable to mutagen's LaunchAgent. The
+wrapper rewrites `ConnectTimeout 5→30`, `ServerAliveInterval 10→15`,
+`ServerAliveCountMax 1→4`, `exec`s `/usr/bin/ssh` with everything else as-is,
+and tees ssh's stderr to `~/.obsync/ssh-wrapper.log`. That log matters:
+mutagen **discards** the error of every failed reconnect (`lastError` keeps
+showing the original `unexpected EOF`), so it is the only place the breaker can
+see a ban. `obsync ssh-wrapper off` undoes it; re-run `on` after any
+`mutagen daemon register`, which rewrites the plist.
+
 ## Configuration — `~/.obsync/config.json`
 
 | Key | Meaning |
@@ -159,6 +209,8 @@ folder that nests with an existing link warns you.
 | `destPrefix` | Destination name template, default `"[from:{name}] "`; `""` disables |
 | `localLabel` | What the local side is called in that prefix |
 | `warnSizeMB` / `warnFileCount` | Size-warning thresholds; `0` disables |
+| `hosts[].failover[]` | Sibling HostNames this alias may be switched to (shared filesystem) |
+| `breaker` | Circuit-breaker knobs, see above |
 
 `lastLocalDir` and `hosts[].lastRemoteDir` are written automatically.
 
@@ -172,6 +224,8 @@ folder that nests with an existing link warns you.
 | File counts differ | Check whether the difference is in `ignore` (`.obsidian/`, `.git/`, …). Compare names with `find . -type f`, not counts |
 | A link vanished | No data is lost; both sides keep their files. Drag it back — you'll get the merge prompt |
 | Links stuck "connecting", but `ssh <host>` works fine | An ssh ControlMaster is out of channels. Remove `ControlMaster` from that host's `~/.ssh/config` block and delete its socket; obsync does its own multiplexing |
+| "Not allowed at this time" / every ssh refused | sshd PerSourcePenalties banned your IP. Don't keep retrying that node; wait ≥10 min or switch node. See *Circuit breaker* and `obsync events` |
+| Cards say "paused · breaker" | Expected while a server is tripped; it probes and resumes on its own. *立即探测* forces the probe |
 | UI won't open | `obsync log` |
 
 ## License

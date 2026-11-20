@@ -136,6 +136,45 @@ mutagen 的连接则保持直连。
 就会有两个会话管着同一批文件，互相回放对方的写入。拖动一个和已有链接
 存在嵌套关系的文件夹时，会给你警告。
 
+## 熔断 —— 别让 IP 被封
+
+OpenSSH ≥ 9.8 的 sshd 有 `PerSourcePenalties`：凡是**认证前**就结束的连接（客户端超时、
+放弃、认证失败）都会给来源 IP 记罚时；攒够之后，这个 IP 的**所有**新连接（包括你的终端和
+VS Code）都会被直接拒绝（"Not allowed at this time"），最长 10 分钟。mutagen 正好是罚时
+制造机：它写死了 `-oConnectTimeout=5 -oServerAliveCountMax=1`，每个会话每 15 秒重连一次，
+永不停止。登录节点一慢、六个会话，几分钟就能把 IP 封掉。
+
+obsync 按**服务器**做熔断（别名先用 `ssh -G` 解析；HostName 相同的两个别名是同一个 sshd、
+同一笔罚时）：
+
+- **熔断**：某个会话连续 35 秒连不上远端（≈ 两次重连失败），或者任何 ssh 输出里出现
+  `Not allowed at this time` / `banner exchange` / `kex_exchange_identification`，立刻
+  `mutagen sync pause` 这台服务器上的全部 obsync 会话；obsync 自己对它的目录浏览也会被拒绝。
+- **退避**：2 → 5 → 10 → 20 分钟（之后保持 20）；被封过则至少等 10 分钟。DNS / 网络不可达
+  的失败根本到不了服务器，不会加罚时，所以每分钟重试一次、不升级。
+- **探测**：只发一次真正完成登录的 `ssh -o BatchMode=yes -o ConnectTimeout=30 <别名> true`。
+  绝不用 `nc` 或"读完 banner 就断开"的 socket 检测——在 sshd 看来那本身就是认证前断开，
+  照样加罚时。也绝不并发探测。
+- **恢复**：只恢复它暂停的会话，每 8 秒一个；中途再失败就再次熔断。
+- **切换节点**（可选）：给主机配 `"failover": ["login1…", "login2…"]`，中栏会出现
+  「切换节点」：暂停 → 改该别名所在 `~/.ssh/config` 块里的 `HostName`（备份到
+  `~/.obsync/ssh-config-backups/`）→ 探测 → 恢复。10 分钟内封过你的节点会拒绝切过去。
+  `"breaker": {"autoFailover": true}` 可在被封时自动切换。
+
+每次暂停 / 探测 / 恢复 / 切换都会连同触发它的原始报错写进 `~/.obsync/breaker.log`
+（`obsync events` 查看）；mutagen 守护进程自己不写日志。参数在配置的 `"breaker"` 下
+（`tripAfterSeconds`、`backoffMinutes`、`bannedMinutes`、`staggerSeconds`、`enabled` …）。
+
+**ssh 包装脚本。** 命令行上的 `-o` 优先于 `~/.ssh/config`，所以 mutagen 的超时在配置文件里
+改不了。mutagen 0.18 在*守护进程*环境里有 `MUTAGEN_SSH_PATH`（一个目录）时，会从那里找
+`ssh` 和 `scp`。`obsync ssh-wrapper on` 把 `libexec/ssh-wrapper.sh` 装到
+`~/.obsync/ssh-bin/`，并把这个变量加进 mutagen 的 LaunchAgent。包装脚本把
+`ConnectTimeout 5→30`、`ServerAliveInterval 10→15`、`ServerAliveCountMax 1→4`，其余参数
+原样 `exec /usr/bin/ssh`，并把 ssh 的 stderr 复制一份到 `~/.obsync/ssh-wrapper.log`。
+这份日志很关键：mutagen 会**丢弃**每次重连失败的错误（`lastError` 一直停在最初的
+`unexpected EOF`），熔断器只能从这里看到封禁信息。`obsync ssh-wrapper off` 可撤销；
+执行过 `mutagen daemon register`（会重写 plist）之后要再 `on` 一次。
+
 ## 配置 —— `~/.obsync/config.json`
 
 | 键 | 含义 |
@@ -149,6 +188,8 @@ mutagen 的连接则保持直连。
 | `destPrefix` | 目的地命名模板，默认 `"[from:{name}] "`；填 `""` 可禁用 |
 | `localLabel` | 在该前缀里本地这一侧的称呼 |
 | `warnSizeMB` / `warnFileCount` | 体积警告阈值；`0` 表示禁用 |
+| `hosts[].failover[]` | 这个别名可以切换到的兄弟节点 HostName（共享文件系统） |
+| `breaker` | 熔断参数，见上文 |
 
 `lastLocalDir` 和 `hosts[].lastRemoteDir` 由程序自动写入。
 
@@ -162,6 +203,8 @@ mutagen 的连接则保持直连。
 | 文件数对不上 | 先看差异是不是落在 `ignore` 里（`.obsidian/`、`.git/`、…）。用 `find . -type f` 比对文件名，别比数字 |
 | 链接不见了 | 数据没丢；两侧的文件都还在。拖回去就行——会出现合并提示 |
 | 链接卡在 "connecting"，但 `ssh <主机>` 却正常 | ssh ControlMaster 的通道用尽了。把该主机 `~/.ssh/config` 块里的 `ControlMaster` 去掉并删除它的 socket；obsync 自己会做复用 |
+| "Not allowed at this time" / 所有 ssh 都被拒 | sshd 的 PerSourcePenalties 封了你的 IP。别在那台节点上继续重试；等 ≥10 分钟或切换节点。见「熔断」和 `obsync events` |
+| 卡片显示「已暂停 · 熔断保护」 | 服务器熔断期间的正常状态，会自动探测并恢复；「立即探测」可提前探测 |
 | UI 打不开 | `obsync log` |
 
 ## 许可证

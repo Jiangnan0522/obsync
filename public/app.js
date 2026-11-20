@@ -12,6 +12,7 @@ const state = {
   localDir: null,      // local working dir
   localRoots: [],
   remoteRoots: [],
+  breaker: null,       // /api/breaker snapshot
 };
 
 const $ = (id) => document.getElementById(id);
@@ -318,7 +319,9 @@ function renderHosts() {
     const n = state.sessions.filter((s) => s.host === h.alias).length;
     const el = document.createElement('div');
     el.className = 'host' + (h.alias === state.host ? ' active' : '');
-    el.innerHTML = `<span class="nm"></span><span class="ct">${n || ''}</span>
+    const b = brkOf(h.alias);
+    const badge = b ? `<span class="brk-badge ${b.state}" title="${BRK_TEXT[b.state]}">${BRK_SHORT[b.state]}</span>` : '';
+    el.innerHTML = `<span class="nm"></span>${badge}<span class="ct">${n || ''}</span>
       <button class="host-x" title="移除主机">✕</button>`;
     el.querySelector('.nm').textContent = h.label || h.alias;
     el.querySelector('.nm').title = h.alias;
@@ -557,6 +560,8 @@ async function openRemoteRoot() {
 // ---------------------------------------------------------------------------
 
 function statusView(s) {
+  const b = brkOf(s.host);
+  if (s.paused && b && b.paused.includes(s.name)) return { dot: 'bad', cls: 'bad', text: '已暂停 · 熔断保护（等待探测后自动恢复）' };
   if (s.paused) return { dot: 'idle', cls: '', text: '已暂停' };
   if (!s.alphaConnected || !s.betaConnected) return { dot: 'bad', cls: 'bad', text: '连接断开 — 检查 SSH / MFA' };
   if (s.conflicts) return { dot: 'bad', cls: 'bad', text: `${s.conflicts} 个冲突待解决` };
@@ -579,10 +584,12 @@ function renderLinks() {
   const body = $('linksBody');
   const mine = state.sessions.filter((s) => s.host === state.host);
   body.innerHTML = '';
+  const strip = renderBreakerStrip(state.host);
+  if (strip) body.appendChild(strip);
 
   if (!mine.length) {
-    body.innerHTML =
-      '<div class="empty">还没有同步链接<br><span style="font-size:11px">从左栏或右栏拖一个文件夹进来</span></div>';
+    body.insertAdjacentHTML('beforeend',
+      '<div class="empty">还没有同步链接<br><span style="font-size:11px">从左栏或右栏拖一个文件夹进来</span></div>');
     return;
   }
 
@@ -753,6 +760,152 @@ async function addLink(entry, source) {
 }
 
 // ---------------------------------------------------------------------------
+// circuit breaker (see breaker.js): per-server pause → backoff → probe → resume
+// ---------------------------------------------------------------------------
+
+const BRK_SHORT = { open: '熔断', probing: '探测', resuming: '恢复' };
+const BRK_TEXT = {
+  open: '熔断中：会话已暂停，等待退避后探测',
+  probing: '正在用一次完整登录探测服务器…',
+  resuming: '探测成功，正在错峰恢复会话…',
+};
+
+// The breaker record covering this alias's server, only while not closed.
+function brkOf(alias) {
+  const b = state.breaker;
+  if (!b || !alias) return null;
+  const key = b.aliases[alias];
+  const r = b.endpoints.find((e) => e.key === key && e.aliases.includes(alias));
+  return r && r.state !== 'closed' ? r : null;
+}
+
+// Any record (closed included) for the alias: the failover list lives there.
+function nodeOf(alias) {
+  const b = state.breaker;
+  if (!b) return null;
+  const key = b.aliases[alias];
+  return { key, hostName: key ? key.replace(/:\d+$/, '') : '', rec: b.endpoints.find((e) => e.key === key) };
+}
+
+function mmss(ms) {
+  if (ms <= 0) return '即将';
+  const m = Math.floor(ms / 60000), sec = Math.floor((ms % 60000) / 1000);
+  return `${m}:${String(sec).padStart(2, '0')} 后`;
+}
+
+function renderBreakerStrip(alias) {
+  const h = state.hosts.find((x) => x.alias === alias);
+  if (!h) return null;
+  const r = brkOf(alias);
+  const n = nodeOf(alias);
+  const hasFailover = (h.failover || []).length > 0;
+  if (!r && !hasFailover) return null;
+
+  const el = document.createElement('div');
+  el.className = 'brk' + (r ? ' ' + r.state : '');
+  const node = (r && r.hostName) || (n && n.hostName) || '—';
+  let main;
+  if (!r) {
+    main = `<span class="brk-node">节点 <code></code></span>`;
+  } else {
+    const when = r.state === 'open' ? (r.until ? `${mmss(r.until - Date.now())}探测` : '等待中') : BRK_TEXT[r.state];
+    main = `<div class="brk-title">⚡ ${BRK_SHORT[r.state]} · <code></code> · ${when}</div>
+      <div class="brk-why"></div><div class="brk-err"></div>`;
+  }
+  el.innerHTML = `<div class="brk-main">${main}</div><div class="brk-acts">
+    ${r && r.state === 'open' ? '<button class="btn ok" data-a="probe">立即探测</button>' : ''}
+    ${hasFailover ? '<button class="btn" data-a="switch">切换节点…</button>' : ''}
+    <button class="btn" data-a="log">日志</button></div>`;
+  el.querySelector('code').textContent = node;
+  if (r) {
+    el.querySelector('.brk-why').textContent = `${r.reason || ''}${r.paused.length ? ` · 已暂停 ${r.paused.length} 个会话` : ''}`;
+    el.querySelector('.brk-err').textContent = r.error || '';
+  }
+  el.querySelectorAll('[data-a]').forEach((b) => {
+    b.onclick = () => {
+      if (b.dataset.a === 'probe') probeNow(alias, b);
+      else if (b.dataset.a === 'switch') switchNodeDialog(alias);
+      else showBreakerLog();
+    };
+  });
+  return el;
+}
+
+async function probeNow(alias, btn) {
+  btn.disabled = true;
+  btn.textContent = '探测中…';
+  try {
+    const r = await post('/api/breaker/probe', { alias });
+    state.breaker = r.breaker;
+    renderAll();
+    toast(r.ok ? '探测成功，正在错峰恢复会话' : `探测失败：${r.error}`, !r.ok);
+  } catch (err) { toast(err.message, true); renderAll(); }
+}
+
+function switchNodeDialog(alias) {
+  const h = state.hosts.find((x) => x.alias === alias);
+  const n = nodeOf(alias);
+  const banned = {};
+  for (const e of (state.breaker && state.breaker.endpoints) || []) {
+    for (const f of e.failover || []) if (f.bannedUntil) banned[f.hostName] = f.bannedUntil;
+  }
+  return modal((box, done) => {
+    box.innerHTML = `
+      <div class="modal-title">切换登录节点</div>
+      <div class="modal-detail">先暂停这台服务器上的全部会话，再改 ~/.ssh/config 里 Host ${alias} 的 HostName（会备份），用一次完整登录探测新节点，成功后错峰恢复。共用同一 Host 块的别名会一起切换。</div>
+      <div class="node-list"></div>
+      <div class="modal-note" hidden></div>
+      <div class="modal-acts"><button class="btn" data-v="0">关闭</button></div>`;
+    const list = box.querySelector('.node-list');
+    const note = box.querySelector('.modal-note');
+    for (const hn of h.failover || []) {
+      const row = document.createElement('button');
+      const cur = n && n.hostName === hn.toLowerCase();
+      const ban = banned[hn.toLowerCase()];
+      row.className = 'node-row' + (cur ? ' cur' : '') + (ban ? ' banned' : '');
+      row.disabled = cur || !!ban;
+      row.innerHTML = `<code></code><span class="node-tag"></span>`;
+      row.querySelector('code').textContent = hn;
+      row.querySelector('.node-tag').textContent = cur ? '当前' : ban ? `已封禁 · ${mmss(ban - Date.now())}解封` : '切换到这里';
+      row.onclick = async () => {
+        list.querySelectorAll('button').forEach((b) => (b.disabled = true));
+        note.hidden = false;
+        note.className = 'modal-note';
+        note.textContent = `正在切换到 ${hn} 并探测（最多约 30 秒）…`;
+        try {
+          const r = await post('/api/breaker/switch', { alias, hostName: hn });
+          state.breaker = r.breaker;
+          renderAll();
+          if (r.ok) { toast(`已切换到 ${hn}，正在错峰恢复会话`); done(true); }
+          else { note.className = 'modal-note bad'; note.textContent = `已切换，但探测失败：${r.error}（会按退避继续探测）`; }
+        } catch (err) {
+          note.className = 'modal-note bad';
+          note.textContent = err.message;
+          list.querySelectorAll('button').forEach((b) => (b.disabled = b.classList.contains('cur') || b.classList.contains('banned')));
+        }
+      };
+      list.appendChild(row);
+    }
+    box.querySelector('[data-v="0"]').onclick = () => done(null);
+  });
+}
+
+async function showBreakerLog() {
+  let lines = [];
+  try { lines = (await api('/api/breaker/log')).lines; } catch (err) { toast(err.message, true); return; }
+  modal((box, done) => {
+    box.classList.add('wide');
+    box.innerHTML = `<div class="modal-title">熔断日志 <span class="dim">~/.obsync/breaker.log</span></div>
+      <pre class="log-view"></pre>
+      <div class="modal-acts"><button class="btn" data-v="0">关闭</button></div>`;
+    const pre = box.querySelector('pre');
+    pre.textContent = lines.length ? lines.join('\n') : '（还没有记录）';
+    setTimeout(() => (pre.scrollTop = pre.scrollHeight), 0);
+    box.querySelector('[data-v="0"]').onclick = () => done(null);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 
@@ -775,7 +928,9 @@ function selectHost(alias) {
 
 async function refresh() {
   try {
-    state.sessions = await api('/api/sessions');
+    const [sessions, breaker] = await Promise.all([api('/api/sessions'), api('/api/breaker').catch(() => state.breaker)]);
+    state.sessions = sessions;
+    state.breaker = breaker;
     renderAll();
   } catch { /* daemon may be restarting; next tick retries */ }
 }
@@ -790,6 +945,7 @@ async function boot() {
     state.localRoots = s.localRoots;
     state.destPrefix = s.destPrefix;
     state.localLabel = s.localLabel;
+    state.breaker = await api('/api/breaker').catch(() => null);
     selectHost(s.hosts[0] && s.hosts[0].alias);
     await loadLocal(null);
   } catch (err) {
