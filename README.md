@@ -70,7 +70,7 @@ cannot answer a password challenge.
   from: `local → remote`, `remote → local`, or `merged` when both sides already
   had content and no direction is truthful.
 - **Destination prefix** — the side a sync *creates* is named
-  `[from:<origin>] <name>`, so it is obvious it is not hand-made. Round-tripping
+  `[from * <origin>] <name>`, so it is obvious it is not hand-made. Round-tripping
   never nests the prefix.
 - **Disconnect** — drag a card to the trash zone, or click `✕`. Both sides are
   kept by default; a checkbox offers to delete the side the sync created.
@@ -206,7 +206,7 @@ see a ban. `obsync ssh-wrapper off` undoes it; re-run `on` after any
 | `syncMode` | `two-way-safe` (default), `one-way-safe`, … |
 | `ignore[]` | mutagen ignore patterns |
 | `remotePollSeconds` | Remote poll interval (default 10) |
-| `destPrefix` | Destination name template, default `"[from:{name}] "`; `""` disables |
+| `destPrefix` | Destination name template, default `"[from * {name}] "`; `""` disables |
 | `localLabel` | What the local side is called in that prefix |
 | `warnSizeMB` / `warnFileCount` | Size-warning thresholds; `0` disables |
 | `hosts[].failover[]` | Sibling HostNames this alias may be switched to (shared filesystem) |

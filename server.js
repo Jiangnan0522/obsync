@@ -537,9 +537,9 @@ async function removeHost(cfg, alias) {
 // destination naming
 // ---------------------------------------------------------------------------
 
-// Folders created by a sync get a "[from:X] " prefix naming the side the
+// Folders created by a sync get a "[from * X] " prefix naming the side the
 // content came from, so they are obviously not hand-made.
-const PREFIX_RE = /^\[from:[^\]]*\]\s*/;
+const PREFIX_RE = /^\[from(?::| \* )[^\]]*\]\s*/;
 
 function stripPrefix(name) {
   // Repeat: a folder round-tripped a few times can carry more than one.
@@ -553,9 +553,9 @@ function originLabel(cfg, host, source) {
 }
 
 // The counterpart's basename. Strips any existing prefix first, otherwise a
-// folder dragged back and forth accumulates "[from:A] [from:B] ...".
+// folder dragged back and forth accumulates "[from * A] [from * B] ...".
 function destName(cfg, host, source, srcName) {
-  const tpl = cfg.destPrefix ?? '[from:{name}] ';
+  const tpl = cfg.destPrefix ?? '[from * {name}] ';
   const base = stripPrefix(srcName);
   if (!tpl) return base;
   return tpl.replace('{name}', originLabel(cfg, host, source)).replace(/\//g, '_') + base;
@@ -782,7 +782,7 @@ async function handle(req, res) {
     return json(res, 200, {
       hosts: cfg.hosts,
       localRoots: cfg.localRoots,
-      destPrefix: cfg.destPrefix ?? '[from:{name}] ',
+      destPrefix: cfg.destPrefix ?? '[from * {name}] ',
       localLabel: cfg.localLabel || 'Mac',
       syncMode: cfg.syncMode,
       ignore: cfg.ignore,

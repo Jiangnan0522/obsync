@@ -65,7 +65,7 @@ obsync 是调用系统的 `ssh`，所以你在那边配的一切都会被继承�
   `contains N`（虚线）表示它下面某处有链接的根。
 - **方向徽章** —— 每张链接卡片会标明内容最初是从哪边来的：`local → remote`、
   `remote → local`，或者 `merged`——两边本来就都有内容，说哪个方向都不算实话。
-- **目的地前缀** —— 同步*新建出来*的那一侧会命名为 `[from:<origin>] <name>`，
+- **目的地前缀** —— 同步*新建出来*的那一侧会命名为 `[from * <origin>] <name>`，
   一眼就能看出它不是手工建的。来回同步不会把前缀套娃。
 - **断开** —— 把卡片拖到垃圾桶区域，或点 `✕`。默认两侧都保留；
   有个复选框可以顺带删掉同步新建出来的那一侧。
@@ -185,7 +185,7 @@ obsync 按**服务器**做熔断（别名先用 `ssh -G` 解析；HostName 相�
 | `syncMode` | `two-way-safe`（默认）、`one-way-safe`、… |
 | `ignore[]` | mutagen 的忽略规则 |
 | `remotePollSeconds` | 远端轮询间隔（默认 10） |
-| `destPrefix` | 目的地命名模板，默认 `"[from:{name}] "`；填 `""` 可禁用 |
+| `destPrefix` | 目的地命名模板，默认 `"[from * {name}] "`；填 `""` 可禁用 |
 | `localLabel` | 在该前缀里本地这一侧的称呼 |
 | `warnSizeMB` / `warnFileCount` | 体积警告阈值；`0` 表示禁用 |
 | `hosts[].failover[]` | 这个别名可以切换到的兄弟节点 HostName（共享文件系统） |

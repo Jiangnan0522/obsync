@@ -112,7 +112,7 @@ const ORIGIN = {
 };
 
 // Preview only — the server owns the real rule (see destName there).
-const PREFIX_RE = /^\[from:[^\]]*\]\s*/;
+const PREFIX_RE = /^\[from(?::| \* )[^\]]*\]\s*/;
 function destNamePreview(source, srcName) {
   let base = srcName;
   while (PREFIX_RE.test(base)) base = base.replace(PREFIX_RE, '');

@@ -47,7 +47,7 @@ else
   "hosts": [],
   "syncMode": "two-way-safe",
   "remotePollSeconds": 5,
-  "destPrefix": "[from:{name}] ",
+  "destPrefix": "[from * {name}] ",
   "localLabel": "$(scutil --get ComputerName 2>/dev/null || echo Mac)",
   "warnSizeMB": 5,
   "warnFileCount": 2000,
